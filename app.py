@@ -2,6 +2,11 @@ import operator
 from typing import Annotated, List, TypedDict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
+import os
+
+# New Imports for Retrieval & Generation
+from langchain_chroma import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 
 # 1. Define the State
 class AgentState(TypedDict):
@@ -21,27 +26,83 @@ class QualityReview(BaseModel):
 
 def retrieve(state: AgentState):
     print("---RETRIEVING---")
-    # Generic placeholder for your Vector DB (Pinecone/Chroma)
-    return {"context": ["Snippet 1 from doc...", "Snippet 2 from doc..."]}
+    
+    if "GOOGLE_API_KEY" not in os.environ:
+        print("Warning: GOOGLE_API_KEY not set. Returning mock context.")
+        return {"context": ["Mock Context: Section 4.2 penalty is $500."]}
+
+    try:
+        # 1. Connect to the existing DB
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+        
+        # 2. Search
+        # k=3 means "get top 3 most relevant chunks"
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        docs = retriever.invoke(state["question"])
+        
+        # 3. Format for the agent
+        context_text = [doc.page_content for doc in docs]
+        
+        # Fallback if nothing found (prevent empty context errors downstream)
+        if not context_text:
+             context_text = ["No relevant documents found."]
+             
+        return {"context": context_text}
+        
+    except Exception as e:
+        print(f"Retrieval Error: {e}")
+        return {"context": ["Error retrieving documents."]}
 
 def generate_answer(state: AgentState):
     print("---GENERATING---")
-    # The LLM draft based on state['context']
-    return {"answer": "The contract ends on Jan 1st.", "iterations": state.get("iterations", 0) + 1}
+    
+    # Initialize Gemini
+    llm = ChatGoogleGenerativeAI(model="gemini-3-pro-preview", temperature=0)
+    
+    # Create prompt
+    context_str = "\n".join(state["context"])
+    prompt = f"""
+    Answer the question based ONLY on the context below.
+    
+    Context:
+    {context_str}
+    
+    Question: {state['question']}
+    
+    Answer:
+    """
+    
+    response = llm.invoke(prompt)
+    return {"answer": response.content, "iterations": state.get("iterations", 0) + 1}
 
 def critique_answer(state: AgentState):
     print("---CRITIQUING---")
-    # Second LLM call (The Critic) comparing state['answer'] vs state['context']
-    # If the LLM sees the date is wrong, it gives a low score.
-    review = QualityReview(score=0.4, critique="Date in snippet is Dec 31, but answer says Jan 1.")
+    
+    llm = ChatGoogleGenerativeAI(model="gemini-3-pro-preview", temperature=0)
+    structured_llm = llm.with_structured_output(QualityReview)
+    
+    prompt = f"""
+    You are a strict fact-checker. 
+    Compare the Answer to the Context.
+    
+    Context: {state['context']}
+    Answer: {state['answer']}
+    
+    Give a score (0.0 to 1.0) on how faithful the answer is to the context.
+    If there is any information in the answer NOT in the context, penalize the score.
+    """
+    
+    review = structured_llm.invoke(prompt)
     return {"faithfulness_score": review.score, "critique": review.critique}
 
 # 3. Define the Router (The "Decision Maker")
 def decide_to_finish(state: AgentState):
-    if state["faithfulness_score"] > 0.8 or state["iterations"] > 3:
+    # End if score is high OR if we've looped too many times (to prevent infinite loops)
+    if state["faithfulness_score"] > 0.8 or state["iterations"] > 2:
         return "end"
     else:
-        return "generate" # Loop back to fix it
+        return "generate" 
 
 # 4. Build the Graph
 workflow = StateGraph(AgentState)

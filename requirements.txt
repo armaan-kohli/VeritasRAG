@@ -2,4 +2,8 @@ google-generativeai
 pydantic
 openai
 langgraph
-
+langchain
+langchain-chroma
+langchain-google-genai
+chromadb
+pypdf

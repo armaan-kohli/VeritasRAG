@@ -3,6 +3,8 @@ import asyncio
 import os
 from pydantic import BaseModel, Field
 import google.generativeai as genai
+from golden_dataset import GOLDEN_SET
+from app import app  # Import your actual RAG pipeline
 
 # 1. Define the Evaluation Criteria
 class EvalResult(BaseModel):
@@ -11,7 +13,6 @@ class EvalResult(BaseModel):
     reasoning: str = Field(description="Detailed explanation of why the score was given.")
 
 # Configure Gemini
-# Make sure to set GOOGLE_API_KEY in your environment
 if "GOOGLE_API_KEY" not in os.environ:
     print("Warning: GOOGLE_API_KEY not set. Gemini calls will fail.")
 else:
@@ -36,9 +37,8 @@ async def judge_output(question, ground_truth, ai_answer, context):
     2. Relevance: Did it answer the specific question asked?
     """
     
-    # Using Gemini Pro 3 (assuming "gemini-1.5-pro" or similar is the target for now, update model_name if needed)
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-pro", 
+        model_name="gemini-3-pro-preview", 
         system_instruction="You are a strict grading judge.",
         generation_config={
             "response_mime_type": "application/json",
@@ -54,16 +54,20 @@ async def run_evaluation():
     results = []
     
     for entry in GOLDEN_SET:
-        # Step A: Run your actual RAG pipeline (imported from your main script)
-        # For this skeleton, we assume it returns an answer and the context used.
-        # ai_response = app.invoke({"question": entry['question']})
+        print(f"\nProcessing Question: {entry['question']}")
         
-        # MOCK DATA for demonstration:
-        mock_ai_answer = "The penalty is $500 per day, but only if filed after 30 days."
-        mock_context = "Section 4.2: Late filings incur a $500 daily fee."
+        # Step A: Run your actual RAG pipeline
+        # invoke returns the final state of the graph
+        final_state = await app.ainvoke({"question": entry['question']})
+        
+        ai_answer = final_state['answer']
+        # Context is a list of strings, joining them for the judge
+        context_used = "\n\n".join(final_state['context'])
+        
+        print(f"  -> AI Answer: {ai_answer[:100]}...")
         
         # Step B: Judge it
-        score = await judge_output(entry['question'], entry['ground_truth'], mock_ai_answer, mock_context)
+        score = await judge_output(entry['question'], entry['ground_truth'], ai_answer, context_used)
         results.append(score)
 
     # 5. Summarize
